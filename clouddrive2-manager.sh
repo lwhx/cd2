@@ -5,6 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 APP_NAME='CloudDrive2 Native Manager'
+MANAGER_VERSION='1.1.0'
 SERVICE='clouddrive2.service'
 SERVICE_USER='clouddrive2'
 SERVICE_GROUP='clouddrive2'
@@ -691,7 +692,7 @@ usage() {
 CloudDrive2 Native Manager (Debian/Ubuntu)
 Usage: sudo bash clouddrive2-manager.sh <command>
 Commands:
-  menu                 Interactive management menu
+  menu                 Interactive numbered management menu (default)
   install              Install latest native release + systemd service
   check                Compare installed/latest GitHub release versions
   update               Update with data backup + automatic failure rollback
@@ -706,53 +707,233 @@ Commands:
   enable-allow-other   Permit non-root users to request FUSE allow_other
   relocate /opt/PATH   Move binaries and update systemd service
   uninstall [--yes]    Remove program/service, retain data/backups/mounts
+  system-info          Print system and mount status
+  about                Print manager information
   help                 Show this help
 EOF
 }
 
 run_menu_command() {
-    # Each operation runs in an independent process so set -e and EXIT rollback
-    # traps still work, even if a command fails during interactive management.
+    # Execute management actions in a separate process so that errors and
+    # transaction/rollback EXIT traps never terminate the interactive menu.
     local source_file="${BASH_SOURCE[0]}"
-    bash "$source_file" "$@" || warn 'Operation failed; review the diagnostic output above.'
+    if (( EUID != 0 )); then
+        warn '管理操作需要 root 权限。请使用 sudo bash clouddrive2-manager.sh 或 sudo cd2-native。'
+        return 1
+    fi
+    if [[ ! -f "$source_file" ]]; then
+        warn '无法重新打开脚本文件。请先下载脚本到磁盘后运行，不要通过管道或 bash <(...) 交互运行。'
+        return 1
+    fi
+    if ! bash "$source_file" "$@"; then
+        warn '操作未成功，请查看以上报错及服务日志。'
+        return 1
+    fi
+}
+
+menu_pause() {
+    local ignored
+    if [[ -t 0 && -t 1 ]]; then
+        printf '\n按回车键返回菜单...'
+        IFS= read -r ignored || true
+    fi
+}
+
+menu_action() {
+    printf '\n'
+    run_menu_command "$@" || true
+    menu_pause
+}
+
+menu_confirm() {
+    local answer
+    printf '%s [y/N]: ' "$1"
+    IFS= read -r answer || return 1
+    [[ "$answer" == y || "$answer" == Y ]]
+}
+
+menu_restore() {
+    local archive
+    printf '\n当前可用备份：\n'
+    run_menu_command backups || true
+    printf '\n请输入备份文件名（直接回车使用最新备份，输入 0 取消）: '
+    IFS= read -r archive || return 0
+    if [[ "$archive" == 0 ]]; then return 0; fi
+    if menu_confirm '确认恢复备份？恢复过程中服务会暂时停止'; then
+        menu_action restore "${archive:-latest}"
+    else
+        warn '已取消恢复。'
+        menu_pause
+    fi
+}
+
+menu_version_management() {
+    local choice
+    while true; do
+        printf '\n版本管理：\n'
+        printf '1、检查官方最新版本\n2、查看当前版本\n3、回滚到上一版本\n4、查看备份列表\n'
+        printf '%s\n' '-------------------'
+        printf '0、返回主菜单\n\n请输入选项 [0-4]: '
+        IFS= read -r choice || return 0
+        case "$choice" in
+            1) menu_action check ;;
+            2) menu_action version ;;
+            3) if menu_confirm '确定要回滚到上一版本吗？'; then menu_action rollback
+               else warn '已取消回滚。'; menu_pause; fi ;;
+            4) menu_action backups ;;
+            0) return 0 ;;
+            *) warn '无效选项，请输入 0-4。'; menu_pause ;;
+        esac
+    done
+}
+
+show_mount_info() {
+    printf '\nFUSE 挂载信息：\n'
+    printf '挂载目录：%s\n' "$MOUNT_DIR"
+    if [[ -e /dev/fuse ]]; then printf 'FUSE 设备：已存在\n'
+    else printf 'FUSE 设备：缺失（本地挂载不可用）\n'; fi
+    if command -v mountpoint >/dev/null 2>&1 && mountpoint -q "$MOUNT_DIR"; then
+        printf '挂载状态：已挂载\n'
+        if command -v findmnt >/dev/null 2>&1; then
+            findmnt -T "$MOUNT_DIR" -o SOURCE,TARGET,FSTYPE || true
+        fi
+    else
+        printf '挂载状态：未挂载（需在 CloudDrive2 网页中创建挂载点）\n'
+    fi
+}
+
+menu_advanced_management() {
+    local choice target
+    while true; do
+        printf '\n挂载与高级设置：\n'
+        printf '1、启用 FUSE allow_other\n2、迁移程序安装目录\n3、查看本地挂载状态\n'
+        printf '%s\n' '-------------------'
+        printf '0、返回主菜单\n\n请输入选项 [0-3]: '
+        IFS= read -r choice || return 0
+        case "$choice" in
+            1) menu_action enable-allow-other ;;
+            2)
+                printf '请输入新安装目录（必须位于 /opt 下，输入 0 取消）: '
+                IFS= read -r target || return 0
+                if [[ "$target" != 0 && -n "$target" ]]; then
+                    menu_action relocate "$target"
+                else
+                    warn '已取消迁移。'
+                    menu_pause
+                fi
+                ;;
+            3) show_mount_info; menu_pause ;;
+            0) return 0 ;;
+            *) warn '无效选项，请输入 0-3。'; menu_pause ;;
+        esac
+    done
+}
+
+show_system_info() {
+    printf '\n系统状态：\n'
+    if [[ -r /etc/os-release ]]; then
+        local os
+        os="$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release | head -n 1)"
+        os="${os#\"}"
+        os="${os%\"}"
+        printf '操作系统：%s\n' "$os"
+    fi
+    printf '内核版本：%s\n' "$(uname -r)"
+    printf '处理器架构：%s\n' "$(uname -m)"
+    printf 'CloudDrive2：%s\n' "$(current_version)"
+    if [[ -f "$UNIT" ]]; then
+        if service_running; then printf '服务状态：运行中\n'
+        else printf '服务状态：未运行\n'; fi
+    else
+        printf '服务状态：未安装\n'
+    fi
+    if [[ -e /dev/fuse ]]; then printf 'FUSE 设备：存在\n'
+    else printf 'FUSE 设备：缺失\n'; fi
+    if command -v free >/dev/null 2>&1; then
+        printf '\n内存使用：\n'
+        free -h
+    fi
+    if command -v df >/dev/null 2>&1; then
+        printf '\n系统分区：\n'
+        df -h /
+    fi
+    show_mount_info
+}
+
+show_about() {
+    printf '\n关于 CloudDrive2 原生管理脚本\n'
+    printf '管理脚本版本：v%s\n' "$MANAGER_VERSION"
+    printf '部署方式：Linux 原生二进制 + systemd（不使用 Docker）\n'
+    printf '官方核心版本：%s\n' "$(current_version)"
+    printf '项目仓库：https://github.com/lwhx/cd2\n'
+    printf 'CloudDrive2 官网：https://www.clouddrive2.com/\n'
+    printf '说明：这是第三方管理脚本，不是 CloudDrive2 官方安装器。\n'
+    printf '提示：管理员密码请在 CloudDrive2 网页中管理；Docker 管理不适用于原生部署。\n'
+    printf '安全：升级前会备份数据；卸载默认保留用户配置、备份和挂载目录。\n'
 }
 
 menu() {
-    local choice name target
+    local choice state
     while true; do
+        # Reload after install/relocate/uninstall: each command runs in a child.
         INSTALL_ROOT='/opt/clouddrive2'
-        load_state
-        printf '\n=========================================\n'
-        printf ' CloudDrive2 原生版管理工具 (systemd)\n'
-        printf ' 当前版本: %s\n' "$(current_version)"
-        printf '=========================================\n'
-        printf ' 1) 安装                  2) 更新\n'
-        printf ' 3) 检查版本              4) 运行状态\n'
-        printf ' 5) 启动                  6) 停止\n'
-        printf ' 7) 重启                  8) 日志\n'
-        printf ' 9) 备份                 10) 备份列表\n'
-        printf '11) 恢复                 12) 回滚\n'
-        printf '13) 允许其他用户挂载   14) 迁移程序目录\n'
-        printf '15) 卸载                  0) 退出\n'
-        read -rp $'请选择: ' choice || return 0
+        if (( EUID == 0 )); then load_state; fi
+
+        state='未安装'
+        if [[ -f "$UNIT" ]]; then
+            if service_running; then state='运行中'; else state='未运行'; fi
+        fi
+        printf '\n欢迎使用 CloudDrive2 管理脚本\n'
+        printf '管理脚本：v%s | 核心：%s | 服务：%s\n' "$MANAGER_VERSION" "$(current_version)" "$state"
+        if (( EUID != 0 )); then
+            printf '提示：当前非 root 用户，请使用 sudo 运行以执行管理操作。\n'
+        fi
+        printf '\n'
+        cat <<'EOF'
+基础功能：
+1、安装 CloudDrive2
+2、更新 CloudDrive2
+3、卸载 CloudDrive2
+-------------------
+服务管理：
+4、查看状态
+5、查看日志
+6、启动 CloudDrive2
+7、停止 CloudDrive2
+8、重启 CloudDrive2
+-------------------
+配置管理：
+9、备份配置
+10、恢复配置
+-------------------
+高级选项：
+11、版本管理
+12、挂载与高级设置
+13、系统状态
+14、关于
+-------------------
+0、退出脚本
+
+EOF
+        printf '请输入选项 [0-14]: '
+        IFS= read -r choice || { printf '\n'; return 0; }
         case "$choice" in
-            1) run_menu_command install ;;
-            2) run_menu_command update ;;
-            3) run_menu_command check ;;
-            4) run_menu_command status ;;
-            5) run_menu_command start ;;
-            6) run_menu_command stop ;;
-            7) run_menu_command restart ;;
-            8) run_menu_command logs ;;
-            9) run_menu_command backup ;;
-           10) run_menu_command backups ;;
-           11) run_menu_command backups; read -rp $'备份文件名 (latest): ' name; run_menu_command restore "${name:-latest}" ;;
-           12) run_menu_command rollback ;;
-           13) run_menu_command enable-allow-other ;;
-           14) read -rp $'新目录 (/opt): ' target; run_menu_command relocate "$target" ;;
-           15) run_menu_command uninstall ;;
-            0) return 0 ;;
-            *) warn 'Invalid choice.' ;;
+            1) menu_action install ;;
+            2) menu_action update ;;
+            3) menu_action uninstall ;;
+            4) menu_action status ;;
+            5) menu_action logs ;;
+            6) menu_action start ;;
+            7) menu_action stop ;;
+            8) menu_action restart ;;
+            9) menu_action backup ;;
+           10) menu_restore ;;
+           11) menu_version_management ;;
+           12) menu_advanced_management ;;
+           13) show_system_info; menu_pause ;;
+           14) show_about; menu_pause ;;
+            0) printf '已退出 CloudDrive2 管理脚本。\n'; return 0 ;;
+            *) warn '无效选项，请输入 0-14。'; menu_pause ;;
         esac
     done
 }
@@ -760,10 +941,24 @@ menu() {
 main() {
     local cmd="${1:-menu}"
     if [[ "$cmd" == help || "$cmd" == --help || "$cmd" == -h ]]; then usage; return 0; fi
+    # Display the menu even without root; only operational commands require
+    # elevated permissions. This avoids a confusing initial permission error.
+    if [[ "$cmd" == menu ]]; then menu; return 0; fi
+    if [[ "$cmd" == about ]]; then
+        if (( EUID == 0 )); then load_state; fi
+        show_about
+        return 0
+    fi
+    if [[ "$cmd" == system-info ]]; then
+        if (( EUID == 0 )); then load_state; fi
+        show_system_info
+        return 0
+    fi
     require_root
     load_state
-    if [[ "$cmd" == menu ]]; then menu; return 0; fi
-    ensure_dependencies
+    case "$cmd" in
+        install|check|update|rollback|backup|restore) ensure_dependencies ;;
+    esac
     acquire_lock
     case "$cmd" in
         install) do_install ;;
