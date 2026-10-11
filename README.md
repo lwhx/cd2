@@ -2,7 +2,7 @@
 
 适用：Debian 12/13、Ubuntu（systemd）。部署 CloudDrive2 **原生二进制服务**，不依赖 Docker。管理脚本不是 CloudDrive2 官方项目，也不会自动同步下载整个云盘。
 
-## 📁 目录结构（v1.3.0）
+## 📁 目录结构（v1.3.1）
 
 **程序与本地配置现在统一放在 `/opt/clouddrive2` 下。** 网盘文件仍存储在各自的云盘服务端。
 
@@ -65,7 +65,7 @@ CloudDrive2 卸载选项：
 ```
 
 - **模式 1（默认推荐）**：需要输入 `UNINSTALL` 确认；停止并禁用 systemd 服务，移除程序文件与服务单元，保留 `/opt/clouddrive2/config` 及 `/var/backups/clouddrive2`。重新安装可复用保留配置。
-- **模式 2（危险）**：需要完整输入 `DELETE-ALL-LOCAL-DATA` 再执行。删除整套 `/opt/clouddrive2`、本地配置、管理备份、版本检测缓存；旧版尚未迁移时，还会删除其 `/var/lib/clouddrive2` 目录。
+- **模式 2（危险）**：需要输入小写 `yes` 确认后才执行。删除整套 `/opt/clouddrive2`、本地配置、管理备份、版本检测缓存；旧版尚未迁移时，还会删除其 `/var/lib/clouddrive2` 目录。
 - 无论选择哪种模式，**不会递归删除云端网盘文件，也不会删除或遍历 `/mnt/clouddrive2`**。检测到待删除目录内存在活跃挂载时，会拒绝卸载，以免误操作 FUSE 内容。
 - 管理脚本文件与系统服务用户会保留，便于日后重新安装；彻底卸载不包括对 CloudDrive2 云端账号、订阅或网盘内容执行远程删除操作。
 
@@ -73,7 +73,7 @@ CloudDrive2 卸载选项：
 
 ```bash
 cd2-native uninstall           # 保留配置
-cd2-native uninstall --purge   # 删除全部本地配置、缓存和备份（二次强确认）
+cd2-native uninstall --purge   # 删除全部本地配置、缓存和备份（输入 yes 确认）
 ```
 
 ## 旧版配置迁移（v1.2.x → v1.3.0）
@@ -82,7 +82,7 @@ cd2-native uninstall --purge   # 删除全部本地配置、缓存和备份（�
 
 如需改为同目录布局：
 
-1. 先下载 v1.3.0 的新脚本，更新 `cd2-native`。
+1. 先下载 v1.3.1 的新脚本，更新 `cd2-native`。
 2. 运行 `cd2-native`，选择 **12、挂载与高级设置 → 4、迁移旧版配置到程序目录**；或执行 `cd2-native migrate-config`。
 3. 脚本会停止服务、备份旧配置、复制到 `/opt/clouddrive2/config`、更新 systemd 与状态记录，并验证新服务；成功后清理旧目录。
 4. 如果迁移失败，保留旧目录并尝试恢复旧版服务设置。迁移前备份保存在 `/var/backups/clouddrive2`，可用于人工恢复。
