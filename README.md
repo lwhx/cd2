@@ -1,15 +1,105 @@
 # CloudDrive2 原生版一键管理工具
 
-适用系统：Debian 12/13、Ubuntu（使用 systemd 的 Linux 主机）。仅支持 **原生二进制安装**，不安装 Docker 镜像，也不会修改你的 Docker 容器。
+适用：Debian 12/13、Ubuntu（systemd）。部署 CloudDrive2 **原生二进制服务**，不依赖 Docker。管理脚本不是 CloudDrive2 官方项目，也不会自动同步下载整个云盘。
 
-> 这是独立编写的第三方管理脚本，不是 CloudDrive2 官方安装器。CloudDrive2 核心二进制仅从官方 GitHub 发布仓库下载。本脚本没有在真实目标服务器完成安装验证；已通过本地模拟测试。
+## 📁 目录结构（v1.3.0）
 
-## 中文交互菜单
+**程序与本地配置现在统一放在 `/opt/clouddrive2` 下。** 网盘文件仍存储在各自的云盘服务端。
 
-**不加参数执行脚本会直接打开菜单**（并非直接安装）。界面采用单列数字选项和分组展示：
+```text
+/opt/clouddrive2/
+├── current -> releases/1.x.x  # 当前运行版本（软链接）
+├── releases/                 # 各版本二进制程序
+├── previous -> releases/...  # 上一个程序版本（存在时）
+└── config/                   # CloudDrive2 本地配置与运行状态
+```
+
+| 用途 | 默认路径 |
+|---|---|
+| 下载的管理脚本 | `/root/clouddrive2-manager.sh` |
+| 程序与配置根目录 | `/opt/clouddrive2` |
+| 当前程序版本 | `/opt/clouddrive2/current` |
+| **本地配置目录（CLOUDDRIVE_HOME）** | **`/opt/clouddrive2/config`** |
+| 程序历史版本 | `/opt/clouddrive2/releases` |
+| 备份目录（独立于程序目录） | `/var/backups/clouddrive2` |
+| 网盘挂载位置（需在 Web UI 中启用） | `/mnt/clouddrive2` |
+| systemd 服务 | `/etc/systemd/system/clouddrive2.service` |
+| 已安装的菜单管理命令 | `/usr/local/sbin/cd2-native` |
+| 自动更新检测缓存 | `/var/cache/clouddrive2-native-manager` |
+
+**配置目录并不等于网盘文件目录。** 里面是 CloudDrive2 账号相关状态、挂载设置、缓存、运行数据等；原云盘文件不在此复制一份。备份单独放在 `/var/backups`，避免卸载程序时一起误删。
+
+## 安装 / 打开中文菜单
+
+以 root 登录 Debian/Ubuntu 后：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lwhx/cd2/main/clouddrive2-manager.sh -o /root/clouddrive2-manager.sh
+bash -n /root/clouddrive2-manager.sh
+bash /root/clouddrive2-manager.sh
+```
+
+进入主菜单选择 `1、安装 CloudDrive2`。以后也可以用 `cd2-native` 打开菜单；若没有 root 权限，则使用 `sudo cd2-native`。
+
+如果服务器上已经安装了较旧的管理脚本，可以只更新管理脚本而不重装核心：
+
+```bash
+install -m 0755 /root/clouddrive2-manager.sh /usr/local/sbin/cd2-native
+cd2-native
+```
+
+网页界面默认端口为 `19798`。建议仅在可信网络中访问，公网环境应通过 HTTPS 反代及访问控制保护。
+
+## 卸载：新增两种模式
+
+在主菜单选 `3、卸载 CloudDrive2`：
+
+```text
+CloudDrive2 卸载选项：
+1、仅卸载程序（保留配置、缓存和备份，可重新安装）
+2、卸载并删除全部本地数据（配置、缓存、备份均删除）
+0、返回主菜单
+-------------------
+远端网盘文件与 /mnt/clouddrive2 挂载目录始终不会删除。
+请输入选项 [0-2]:
+```
+
+- **模式 1（默认推荐）**：需要输入 `UNINSTALL` 确认；停止并禁用 systemd 服务，移除程序文件与服务单元，保留 `/opt/clouddrive2/config` 及 `/var/backups/clouddrive2`。重新安装可复用保留配置。
+- **模式 2（危险）**：需要完整输入 `DELETE-ALL-LOCAL-DATA` 再执行。删除整套 `/opt/clouddrive2`、本地配置、管理备份、版本检测缓存；旧版尚未迁移时，还会删除其 `/var/lib/clouddrive2` 目录。
+- 无论选择哪种模式，**不会递归删除云端网盘文件，也不会删除或遍历 `/mnt/clouddrive2`**。检测到待删除目录内存在活跃挂载时，会拒绝卸载，以免误操作 FUSE 内容。
+- 管理脚本文件与系统服务用户会保留，便于日后重新安装；彻底卸载不包括对 CloudDrive2 云端账号、订阅或网盘内容执行远程删除操作。
+
+命令行与菜单等效：
+
+```bash
+cd2-native uninstall           # 保留配置
+cd2-native uninstall --purge   # 删除全部本地配置、缓存和备份（二次强确认）
+```
+
+## 旧版配置迁移（v1.2.x → v1.3.0）
+
+**升级管理脚本不等于迁移用户配置。** 对已用旧版脚本部署的服务器，默认继续读取旧目录 `/var/lib/clouddrive2`，保证现有配置不被误判为不存在。
+
+如需改为同目录布局：
+
+1. 先下载 v1.3.0 的新脚本，更新 `cd2-native`。
+2. 运行 `cd2-native`，选择 **12、挂载与高级设置 → 4、迁移旧版配置到程序目录**；或执行 `cd2-native migrate-config`。
+3. 脚本会停止服务、备份旧配置、复制到 `/opt/clouddrive2/config`、更新 systemd 与状态记录，并验证新服务；成功后清理旧目录。
+4. 如果迁移失败，保留旧目录并尝试恢复旧版服务设置。迁移前备份保存在 `/var/backups/clouddrive2`，可用于人工恢复。
+
+迁移过程可能短暂中断 FUSE 挂载和依赖它的媒体服务，请选择低使用时段操作。**如果旧版 CloudDrive2 使用 Docker 或别的安装器部署，本工具不会自动接管或清除对方的数据。**
+
+历史备份兼容：支持管理器旧版生成的 `clouddrive2/` 备份结构，以及新版 `config/` 结构。恢复前会核验 SHA256，且会保留被覆盖的配置目录以便排查。
+
+## 主菜单及其他功能
 
 ```text
 欢迎使用 CloudDrive2 管理脚本
+
+程序目录：/opt/clouddrive2/current
+配置目录：/opt/clouddrive2/config
+更新检测：已是最新版本 ...
+
 基础功能：
 1、安装 CloudDrive2
 2、更新 CloudDrive2
@@ -37,117 +127,13 @@
 请输入选项 [0-14]:
 ```
 
-「版本管理」包含检查版本、查看已安装版本、回滚和备份列表；「挂载与高级设置」包含启用 FUSE allow_other、迁移程序目录和查看挂载状态。退出子菜单返回主菜单。菜单中的「查看日志」显示最近 80 行并返回菜单；需要持续跟踪日志时请运行 `sudo cd2-native logs`。菜单顶部会显示程序、数据目录和更新检测结果。
+- 打开主菜单时自动比对官方 GitHub Releases 最新核心版本，成功结果缓存 6 小时，检查失败不影响使用。
+- **不会自动安装更新**；选择 2 才会下载核心、先备份配置再升级，启动失败时尝试回滚。
+- 通过 `11` 查看版本及回滚，`12` 管理 FUSE allow_other、配置迁移和程序目录搬迁。
+- 查看日志显示最近 80 行；需要持续跟踪时运行 `cd2-native logs`。
+- FUSE 挂载要在 CloudDrive2 Web 界面配置；需要宿主机提供 `/dev/fuse`，并针对其他 Docker 应用配置权限及挂载传播。
 
-**首次部署**：选择 `1` 安装核心和 systemd 服务。管理员密码在 CloudDrive2 网页界面管理，原生版本不提供 Docker 子菜单，且不自动开启无人值守升级。
+该脚本在 GitHub Actions 中检查语法及模拟菜单/文件操作，但还需在你的真实 Debian VPS 上验证 FUSE 与 CloudDrive2 服务的完整生命周期。
 
-## GitHub 下载并打开菜单（推荐）
-
-脚本统一下载到 **`/root/clouddrive2-manager.sh`**，CloudDrive2 核心和数据仍然分别存储在 `/opt` 和 `/var/lib`：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/lwhx/cd2/main/clouddrive2-manager.sh -o /root/clouddrive2-manager.sh
-bash -n /root/clouddrive2-manager.sh
-sudo bash /root/clouddrive2-manager.sh
-```
-
-打开菜单后选择 `1` 安装。安装成功后也会复制管理命令到 `/usr/local/sbin/cd2-native`。
-
-已经安装旧版脚本时，如果想在 `sudo cd2-native` 中使用新菜单，需要将新下载的脚本覆盖到管理命令位置。**这个操作只更换管理脚本，不会重装 CloudDrive2 核心或删除数据：**
-
-```bash
-sudo install -m 0755 /root/clouddrive2-manager.sh /usr/local/sbin/cd2-native
-sudo cd2-native
-```
-
-**自动检查更新：** 使用 root 打开菜单且 CloudDrive2 已安装时，会自动对比本地核心版本和官方 GitHub 最新发布版本。成功结果缓存 6 小时，网络请求最长约 6 秒。若有新版本，菜单顶部提示并引导选择 `2` 更新。也可以在版本管理中选择 `11 → 1` 手动重新查询。
-
-**自动检查不会自动升级。** 它不创建后台定时任务，不会擅自下载、替换或重启 CloudDrive2；更新必须由你主动选择。
-
-## 安装
-
-将 `clouddrive2-manager.sh` 上传到服务器，然后运行：
-
-```bash
-sudo bash /root/clouddrive2-manager.sh
-# 然后选择 1、安装 CloudDrive2
-```
-
-安装完成后会自动把管理器复制到 `/usr/local/sbin/cd2-native`，以后直接运行：
-
-```bash
-sudo cd2-native
-```
-
-系统会显示单列中文管理菜单。高级操作有子菜单；回到主菜单时重新显示安装与服务状态。
-
-如需非交互式安装，仍可运行 `sudo bash clouddrive2-manager.sh install`。其他命令行用法：
-
-```bash
-sudo cd2-native check
-sudo cd2-native update
-sudo cd2-native status
-sudo cd2-native backup
-sudo cd2-native backups
-sudo cd2-native rollback
-sudo cd2-native logs
-```
-
-初次安装：访问 `http://服务器IP:19798` 进入 CloudDrive2 管理界面。脚本不会自动开启防火墙端口；建议只在可信内网访问，远程访问应使用 HTTPS 反向代理和访问控制。
-
-## 文件路径
-
-| 用途 | 默认路径 |
-|---|---|
-| 下载的管理脚本 | `/root/clouddrive2-manager.sh` |
-| 当前安装版本 | `/opt/clouddrive2/current` |
-| 历史二进制版本 | `/opt/clouddrive2/releases` |
-| 配置与用户数据（`CLOUDDRIVE_HOME`） | `/var/lib/clouddrive2` |
-| 备份文件 | `/var/backups/clouddrive2` |
-| 建议的 FUSE 挂载位置 | `/mnt/clouddrive2` |
-| systemd 服务 | `/etc/systemd/system/clouddrive2.service` |
-| 管理命令 | `/usr/local/sbin/cd2-native` |
-| 官方版本检测缓存 | `/var/cache/clouddrive2-native-manager/latest-release` |
-
-挂载目录 **不会自动挂载**。安装成功后，需在 CloudDrive2 网页端的「挂载点」设置中选择 `/mnt/clouddrive2` 并启用开机自动挂载。
-
-## FUSE 与 Docker 应用
-
-该脚本以 `clouddrive2` 独立低权限系统用户运行核心进程；安装 fuse3 前置依赖，但 `/dev/fuse` 必须由 VPS 宿主机提供。如果没有 `/dev/fuse`，网页管理通常仍能使用，但不能通过 FUSE 挂载成 Linux 目录。
-
-如果希望其他 Linux 用户或 Docker 容器读取 FUSE 挂载：
-
-1. 在管理菜单中使用「允许其他用户挂载」，在 `/etc/fuse.conf` 启用 `user_allow_other`。脚本执行前会备份原配置。
-2. 在 CloudDrive2 的挂载点高级设置中，检查并设置 `allow_other`、UID/GID 与权限，确保读取方有权限。
-3. 对已经运行的 Docker 媒体应用，可以考虑 `:rslave` 绑定传播，例如 `-v /mnt:/mnt:rslave`；否则容器在云盘完成挂载前启动，可能只会看到空目录。是否需要宿主机共享传播还取决于当前挂载配置。
-
-## 升级、备份、恢复与回滚
-
-- `update` 自动查询 CloudDrive2 官方 GitHub 最新核心发布包，识别 x86_64 / aarch64 / armv7，下载后核对包大小和可用的 SHA256 摘要。
-- 升级前停止服务，**完整备份** `CLOUDDRIVE_HOME`，再切换程序版本；服务无法正常启动时尝试自动切回旧版本并恢复升级前配置。
-- 如果原来使用非默认管理端口，更新后以进程健康状态为主要判断依据；默认 19798 在升级前可访问时，还会验证升级后恢复响应。
-- `backup` 为保证配置一致性，会短暂停止并恢复服务；备份完整数据目录可能占用大量空间，请确保磁盘有余量。
-- `restore latest` 会恢复最新一份备份；也可从 `backups` 列表中选择指定备份文件。恢复前旧数据会保留在 `/var/lib` 下带 `.before-restore-...` 后缀的目录。
-- `rollback` 用上一版本二进制替换当前版本，**默认不会倒退配置数据**。若版本间配置格式不兼容，应另外恢复对应的 `preupdate-*` 备份。
-- 停机状态下执行更新，会保留原本停止的状态，不会擅自启动服务。
-
-## 卸载
-
-```bash
-sudo cd2-native uninstall
-```
-
-确认后仅删除程序目录和 `clouddrive2.service`，**保留配置数据、备份与挂载目录，不执行危险的递归删除云盘文件操作**。管理脚本以及独立系统用户也保留，方便重新安装。
-
-## 安全与兼容性说明
-
-- 如果服务器已有 CloudDrive2 Docker 容器或第三方 `clouddrive.service`，请先自行迁移、备份并停止旧服务。本脚本不会自动迁移原 Docker `/Config` 数据，也不会删除旧服务。
-- 自动识别的是官方“核心服务”版本，不是独立的桌面 / 手机客户端版本。
-- 打开菜单时会检查 CloudDrive2 核心更新并缓存成功查询结果 6 小时；不会后台定时检查或无人值守安装更新。
-- 本脚本自身不会自动在线升级；“一键更新”仅指 CloudDrive2 核心程序的更新。
-- 如果一个新版本虽启动成功但出现应用级别的兼容问题，可手动回滚；脚本不能保证覆盖全部潜在故障。
-- 自动回滚与备份**不能代替异机备份**；重要配置应定期另存到其他磁盘或服务器。
-
-官方文档：https://www.clouddrive2.com/help.html
-
-官方发布仓库：https://github.com/cloud-fs/cloud-fs.github.io/releases/latest
+官方文档：https://www.clouddrive2.com/help.html  
+官方发布：https://github.com/cloud-fs/cloud-fs.github.io/releases/latest

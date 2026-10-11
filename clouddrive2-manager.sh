@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 APP_NAME='CloudDrive2 Native Manager'
-MANAGER_VERSION='1.2.1'
+MANAGER_VERSION='1.3.0'
 SERVICE='clouddrive2.service'
 SERVICE_USER='clouddrive2'
 SERVICE_GROUP='clouddrive2'
@@ -13,7 +13,9 @@ UNIT='/etc/systemd/system/clouddrive2.service'
 STATE='/etc/clouddrive2-native-manager.conf'
 MANAGER_BIN='/usr/local/sbin/cd2-native'
 INSTALL_ROOT='/opt/clouddrive2'
-DATA_DIR='/var/lib/clouddrive2'
+CONFIG_LAYOUT='integrated'
+LEGACY_DATA_DIR='/var/lib/clouddrive2'
+DATA_DIR="$INSTALL_ROOT/config"
 BACKUP_DIR='/var/backups/clouddrive2'
 MOUNT_DIR='/mnt/clouddrive2'
 RELEASE_API='https://api.github.com/repos/cloud-fs/cloud-fs.github.io/releases/latest'
@@ -28,6 +30,8 @@ TX_OLD=''
 TX_BACKUP=''
 TX_WAS_RUNNING=0
 TX_SWITCHED=0
+MIGRATION_ACTIVE=0
+MIGRATION_WAS_RUNNING=0
 
 log()  { printf '[INFO] %s\n' "$*" >&2; }
 warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -53,6 +57,18 @@ on_exit() {
         if (( TX_WAS_RUNNING == 1 )); then
             systemctl start "$SERVICE" || warn 'Previous version did not start after rollback.'
         fi
+    fi
+    if (( code != 0 && MIGRATION_ACTIVE == 1 )); then
+        warn '配置目录迁移中断。正在恢复旧版配置目录和服务设置。'
+        systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+        CONFIG_LAYOUT='legacy'
+        DATA_DIR="$LEGACY_DATA_DIR"
+        install_service_unit || warn '恢复旧 systemd 单元失败，请手动检查。'
+        save_state || warn '恢复旧配置路径记录失败，请手动检查。'
+        if (( MIGRATION_WAS_RUNNING == 1 )); then
+            systemctl start "$SERVICE" || warn '旧服务没有自动启动，请检查日志。'
+        fi
+        warn "旧配置未删除：$LEGACY_DATA_DIR；新复制的配置可能保留在 $INSTALL_ROOT/config。"
     fi
     if [[ -n "$TMP_WORK" && -d "$TMP_WORK" ]]; then
         rm -rf -- "$TMP_WORK"
@@ -86,23 +102,37 @@ valid_install_path() {
     return 0
 }
 
+set_config_dir() {
+    case "$CONFIG_LAYOUT" in
+        integrated) DATA_DIR="$INSTALL_ROOT/config" ;;
+        legacy) DATA_DIR="$LEGACY_DATA_DIR" ;;
+        *) fail 'Invalid config layout.'; return 1 ;;
+    esac
+}
+
 load_state() {
+    CONFIG_LAYOUT='integrated'
     if [[ -f "$STATE" ]]; then
         [[ -O "$STATE" && ! -L "$STATE" ]] || { fail 'Managed state file ownership is unsafe.'; exit 1; }
-        local loaded
+        local loaded layout
         loaded="$(sed -n 's/^INSTALL_ROOT=//p' "$STATE" | head -n 1)"
         [[ -n "$loaded" ]] || { fail 'State file is invalid.'; exit 1; }
-        # Only accept an unquoted, strictly validated absolute path.
         valid_install_path "$loaded" || { fail 'State file contains an invalid install path.'; exit 1; }
         INSTALL_ROOT="$loaded"
+        # v1.x state files only had INSTALL_ROOT. Keep their legacy path
+        # until an explicit migration; never make an old installation look fresh.
+        layout="$(sed -n 's/^CONFIG_LAYOUT=//p' "$STATE" | head -n 1)"
+        CONFIG_LAYOUT="${layout:-legacy}"
     fi
+    set_config_dir || exit 1
 }
 
 save_state() {
     valid_install_path "$INSTALL_ROOT" || return 1
+    [[ "$CONFIG_LAYOUT" == integrated || "$CONFIG_LAYOUT" == legacy ]] || return 1
     local t
-    t="$(mktemp '/etc/.clouddrive2-native.conf.XXXXXX')" || return 1
-    printf 'INSTALL_ROOT=%s\n' "$INSTALL_ROOT" > "$t"
+    t="$(mktemp "$(dirname "$STATE")/.clouddrive2-native.conf.XXXXXX")" || return 1
+    printf 'INSTALL_ROOT=%s\nCONFIG_LAYOUT=%s\n' "$INSTALL_ROOT" "$CONFIG_LAYOUT" > "$t"
     chmod 0600 "$t"
     mv -f -- "$t" "$STATE"
 }
@@ -111,6 +141,43 @@ check_managed() {
     [[ -f "$STATE" && -f "$UNIT" && -L "$INSTALL_ROOT/current" ]] || {
         fail 'No managed native installation found. Run install first.'
         return 1
+    }
+}
+
+# Keep all deletion targets inside the expected managed filesystem tree.
+safe_install_root() {
+    valid_install_path "$INSTALL_ROOT" || { fail 'Unsafe installation root.'; return 1; }
+    [[ -d "$INSTALL_ROOT" && ! -L "$INSTALL_ROOT" ]] || { fail 'Invalid or symbolic-link installation root.'; return 1; }
+    [[ "$(realpath -e -- "$INSTALL_ROOT")" == "$INSTALL_ROOT" ]] || {
+        fail 'Installation root resolves through a symlink or outside its expected path.'
+        return 1
+    }
+}
+
+# Never delete or move an active FUSE/bind mount. In particular, cloud files
+# mounted underneath the installation tree must never be traversed by rm.
+assert_no_mounts_under() {
+    local path="$1" mount targets
+    command -v findmnt >/dev/null 2>&1 || { fail 'findmnt is required for safe removal/migration.'; return 1; }
+    targets="$(findmnt -rno TARGET 2>/dev/null)" || { fail 'Unable to inspect mount table; refusing file removal.'; return 1; }
+    [[ -n "$targets" ]] || { fail 'Mount table unexpectedly empty; refusing file removal.'; return 1; }
+    while IFS= read -r mount; do
+        if [[ "$mount" == "$path" || "$mount" == "$path/"* ]]; then
+            fail "Active mount at $mount; refusing to modify $path."
+            return 1
+        fi
+    done <<< "$targets"
+}
+
+safe_legacy_config_path() {
+    [[ "$LEGACY_DATA_DIR" == /var/lib/clouddrive2 ]] || { fail 'Unexpected legacy configuration path.'; return 1; }
+    [[ ! -L "$LEGACY_DATA_DIR" ]] || { fail 'Legacy configuration is a symlink.'; return 1; }
+}
+
+safe_auxiliary_purge_paths() {
+    [[ "$BACKUP_DIR" == /var/backups/clouddrive2 &&
+       "$UPDATE_CACHE_DIR" == /var/cache/clouddrive2-native-manager ]] || {
+        fail 'Unexpected backup/cache path. Refusing purge.'; return 1;
     }
 }
 
@@ -154,9 +221,24 @@ check_conflicts() {
         fail 'Port 19798 appears to be occupied; check an existing CloudDrive2 instance.'
         return 1
     fi
-    if [[ -e "$INSTALL_ROOT" && -n "$(ls -A "$INSTALL_ROOT" 2>/dev/null)" ]]; then
-        fail "Install directory already contains files: $INSTALL_ROOT"
-        return 1
+    if [[ -e "$INSTALL_ROOT" || -L "$INSTALL_ROOT" ]]; then
+        safe_install_root || return 1
+        local entry
+        for entry in "$INSTALL_ROOT"/* "$INSTALL_ROOT"/.[!.]* "$INSTALL_ROOT"/..?*; do
+            [[ -e "$entry" || -L "$entry" ]] || continue
+            if [[ "$entry" == "$INSTALL_ROOT/config" && -d "$entry" && ! -L "$entry" ]]; then
+                continue
+            fi
+            # Preserve restore snapshots during keep-data uninstall/reinstall.
+            if [[ "$entry" == "$INSTALL_ROOT/config.before-restore-"* && -d "$entry" && ! -L "$entry" ]]; then
+                continue
+            fi
+            fail "Install root contains unmanaged files: $entry"
+            return 1
+        done
+        # A prior keep-data uninstall may leave only the config directory.
+        # Reinstalling is allowed so long as no other files are present.
+        assert_no_mounts_under "$INSTALL_ROOT" || return 1
     fi
 }
 
@@ -387,11 +469,14 @@ EOF
 
 install_service_unit() {
     local t
-    t="$(mktemp /etc/systemd/system/.clouddrive2.service.XXXXXX)"
-    make_service_unit "$INSTALL_ROOT" "$t"
-    chmod 0644 "$t"
-    mv -f -- "$t" "$UNIT"
-    systemctl daemon-reload
+    t="$(mktemp "$(dirname "$UNIT")/.clouddrive2.service.XXXXXX")" || return 1
+    if ! make_service_unit "$INSTALL_ROOT" "$t" ||
+       ! chmod 0644 "$t" ||
+       ! mv -f -- "$t" "$UNIT"; then
+        rm -f -- "$t"
+        return 1
+    fi
+    systemctl daemon-reload || return 1
 }
 
 service_running() {
@@ -463,8 +548,17 @@ backup_data() {
     printf '%s\n' "$archive"
 }
 
+backup_payload_name() {
+    local archive="$1" item root
+    item="$(tar -tzf "$archive" 2>/dev/null | sed -n '1p')" || return 1
+    item="${item#./}"
+    root="${item%%/*}"
+    [[ "$root" == config || "$root" == clouddrive2 ]] || return 1
+    printf '%s\n' "$root"
+}
+
 verify_backup() {
-    local archive="$1" basename_archive
+    local archive="$1" basename_archive root
     [[ -f "$archive" && ! -L "$archive" ]] || { fail 'Backup archive missing or symbolic link.'; return 1; }
     [[ "$(dirname "$archive")" == "$BACKUP_DIR" ]] || { fail 'Only manager backups can be restored.'; return 1; }
     basename_archive="$(basename "$archive")"
@@ -474,15 +568,20 @@ verify_backup() {
     (cd "$BACKUP_DIR" && sha256sum -c --status "${basename_archive}.sha256") || {
         fail 'Backup SHA256 check failed.'; return 1;
     }
-    safe_archive_contents "$archive" "$(basename "$DATA_DIR")" || return 1
+    root="$(backup_payload_name "$archive")" || {
+        fail 'Backup has an unrecognized payload directory.'; return 1;
+    }
+    safe_archive_contents "$archive" "$root" || return 1
 }
+
 
 restore_data_from_backup() {
     # Caller must stop the service before calling this function.
     local archive="$1" stage extracted old suffix base
     verify_backup "$archive" || return 1
     stage="$(mktemp -d "$(dirname "$DATA_DIR")/.clouddrive2-restore.XXXXXX")" || return 1
-    base="$(basename "$DATA_DIR")"
+    assert_no_mounts_under "$DATA_DIR" || return 1
+    base="$(backup_payload_name "$archive")" || return 1
     if ! tar --no-same-owner --no-same-permissions -xzf "$archive" -C "$stage"; then
         rm -rf -- "$stage"; return 1
     fi
@@ -548,7 +647,7 @@ do_install() {
     write_latest_cache "$version" || true
     log "Installation complete. Version: $version"
     log "Core directory: $INSTALL_ROOT/current"
-    log "Persistent user data: $DATA_DIR"
+    log "Local configuration: $DATA_DIR"
     log "Configuration backups: $BACKUP_DIR"
     log "Management command: $MANAGER_BIN"
     log "Web UI: http://YOUR_SERVER_IP:$PORT"
@@ -697,35 +796,81 @@ show_backups() {
 
 do_uninstall() {
     check_managed
-    local answer="${1:-}"
-    if [[ "$answer" != '--yes' ]]; then
-        printf $'卸载将保留配置、备份与挂载目录。确认请输入 UNINSTALL: '
-        read -r answer
-        [[ "$answer" == UNINSTALL ]] || { warn 'Cancelled.'; return 0; }
+    local mode="${1:-}" answer
+    [[ "$mode" == '' || "$mode" == '--yes' || "$mode" == '--purge' ]] || {
+        fail 'Usage: uninstall [--yes | --purge]'; return 1;
+    }
+    printf '\n'
+    if [[ "$mode" == '--purge' ]]; then
+        printf '【危险操作】将删除此设备上的 CloudDrive2 程序、配置、缓存和管理备份。\n'
+        printf '删除范围：%s、%s、%s、%s\n' "$INSTALL_ROOT" "$DATA_DIR" "$BACKUP_DIR" "$UPDATE_CACHE_DIR"
+        printf '不会删除远端网盘文件，也不会删除或遍历 %s。\n' "$MOUNT_DIR"
+        printf '重要：删除备份后无法再通过管理脚本恢复原有配置。\n'
+        printf '确认删除全部本地数据，请输入 DELETE-ALL-LOCAL-DATA: '
+        IFS= read -r answer || return 1
+        [[ "$answer" == DELETE-ALL-LOCAL-DATA ]] || { warn '已取消彻底卸载。'; return 0; }
+    elif [[ "$mode" != '--yes' ]]; then
+        printf '仅卸载程序，保留本地配置、备份和挂载目录。确认请输入 UNINSTALL: '
+        IFS= read -r answer || return 1
+        [[ "$answer" == UNINSTALL ]] || { warn '已取消卸载。'; return 0; }
     fi
+
+    # Check every path BEFORE stopping service or touching the systemd unit.
+    safe_install_root || return 1
+    assert_no_mounts_under "$INSTALL_ROOT" || return 1
+    if [[ "$mode" == '--purge' ]]; then
+        assert_no_mounts_under "$BACKUP_DIR" || return 1
+        assert_no_mounts_under "$UPDATE_CACHE_DIR" || return 1
+        if [[ "$CONFIG_LAYOUT" == legacy ]]; then
+            safe_legacy_config_path || return 1
+            assert_no_mounts_under "$LEGACY_DATA_DIR" || return 1
+        fi
+        safe_auxiliary_purge_paths || return 1
+    fi
+
     if ! systemctl stop "$SERVICE" || service_running; then
         fail 'Service is still running; refusing uninstall to protect active mounts.'
         return 1
     fi
+    # CloudDrive2 might not have released the mounts immediately on SIGTERM.
+    assert_no_mounts_under "$INSTALL_ROOT" || return 1
     systemctl disable "$SERVICE" || true
     rm -f -- "$UNIT"
     systemctl daemon-reload
-    # Never delete DATA_DIR, BACKUP_DIR, MOUNT_DIR, or FUSE-mounted content.
-    [[ "$INSTALL_ROOT" == /opt/* && "$INSTALL_ROOT" != /opt ]] || { fail 'Refusing unsafe install root.'; return 1; }
-    rm -rf -- "$INSTALL_ROOT"
+
+    if [[ "$mode" == '--purge' ]]; then
+        rm -rf --one-file-system -- "$INSTALL_ROOT" || return 1
+        if [[ "$CONFIG_LAYOUT" == legacy && -e "$LEGACY_DATA_DIR" ]]; then
+            safe_legacy_config_path || return 1
+            assert_no_mounts_under "$LEGACY_DATA_DIR" || return 1
+            rm -rf --one-file-system -- "$LEGACY_DATA_DIR" || return 1
+        fi
+        assert_no_mounts_under "$BACKUP_DIR" || return 1
+        assert_no_mounts_under "$UPDATE_CACHE_DIR" || return 1
+        rm -rf --one-file-system -- "$BACKUP_DIR" "$UPDATE_CACHE_DIR" || return 1
+        log 'CloudDrive2 程序及本地配置、备份、缓存已删除。'
+        log "未触碰云端文件及挂载目录：$MOUNT_DIR"
+    else
+        # Removing the install root would also erase its integrated config.
+        # Remove only manager-owned binary artifacts and leave config untouched.
+        rm -f -- "$INSTALL_ROOT/current" "$INSTALL_ROOT/previous"
+        rm -rf --one-file-system -- "$INSTALL_ROOT/releases" || return 1
+        log "程序已卸载，本地配置仍保留在：$DATA_DIR"
+        log "管理备份保留在：$BACKUP_DIR"
+        log "云盘挂载位置保持不变：$MOUNT_DIR"
+    fi
     rm -f -- "$STATE"
-    log 'Removed binaries and systemd unit.'
-    log "User data retained: $DATA_DIR"
-    log "Backups retained: $BACKUP_DIR"
-    log "Mount location retained: $MOUNT_DIR"
-    log "Manager command retained: $MANAGER_BIN"
+    log "管理命令仍保留在：$MANAGER_BIN"
 }
+
 
 do_relocate() {
     check_managed
     local target="$1" source="$INSTALL_ROOT" was_running=0
     valid_install_path "$target" || { fail 'Target must be a clean absolute path below /opt.'; return 1; }
     [[ ! -e "$target" && ! -L "$target" ]] || { fail 'Target already exists.'; return 1; }
+    safe_install_root || return 1
+    assert_no_mounts_under "$source" || return 1
     if service_running; then was_running=1; systemctl stop "$SERVICE"; fi
     mkdir -p "$(dirname "$target")"
     local resolved_parent
@@ -741,15 +886,18 @@ do_relocate() {
         fail 'Moving installation failed.'; return 1
     fi
     INSTALL_ROOT="$target"
+    set_config_dir
     if ! install_service_unit; then
-        INSTALL_ROOT="$source"; mv -- "$target" "$source" || true; install_service_unit || true
+        INSTALL_ROOT="$source"; set_config_dir
+        mv -- "$target" "$source" || true
+        install_service_unit || true
         if (( was_running )); then systemctl start "$SERVICE" || true; fi
         return 1
     fi
     if (( was_running )); then
         if ! systemctl start "$SERVICE" || ! wait_healthy; then
             systemctl stop "$SERVICE" || true
-            INSTALL_ROOT="$source"
+            INSTALL_ROOT="$source"; set_config_dir
             mv -- "$target" "$source" || true
             install_service_unit || true
             systemctl start "$SERVICE" || true
@@ -758,13 +906,84 @@ do_relocate() {
         fi
     fi
     save_state
-    log "Installation moved to $INSTALL_ROOT. Data/backups/mount directories were not moved."
+    log "程序与配置目录已迁移到 $INSTALL_ROOT。"
+    log "配置目录：$DATA_DIR；备份和挂载目录未迁移。"
+}
+
+
+do_migrate_config() {
+    check_managed
+    if [[ "$CONFIG_LAYOUT" == integrated ]]; then
+        log "配置已位于程序目录：$DATA_DIR"
+        return 0
+    fi
+    [[ "$CONFIG_LAYOUT" == legacy ]] || { fail 'Unsupported layout.'; return 1; }
+    safe_install_root || return 1
+    safe_legacy_config_path || return 1
+    [[ -d "$LEGACY_DATA_DIR" ]] || { fail '找不到旧版配置目录。'; return 1; }
+    [[ ! -e "$INSTALL_ROOT/config" && ! -L "$INSTALL_ROOT/config" ]] || {
+        fail "目标配置目录已存在，拒绝覆盖：$INSTALL_ROOT/config"; return 1;
+    }
+    assert_no_mounts_under "$LEGACY_DATA_DIR" || return 1
+    assert_no_mounts_under "$INSTALL_ROOT" || return 1
+
+    local was_running=0 backup stage
+    if service_running; then
+        was_running=1
+        systemctl stop "$SERVICE" || return 1
+    fi
+    if ! backup="$(backup_data pre-config-migration)"; then
+        if (( was_running )); then systemctl start "$SERVICE" || true; fi
+        fail '迁移前备份失败，保留旧配置。'
+        return 1
+    fi
+    log "迁移前备份：$backup"
+    if ! stage="$(mktemp -d "$INSTALL_ROOT/.migrate-config.XXXXXX")"; then
+        if (( was_running )); then systemctl start "$SERVICE" || true; fi
+        return 1
+    fi
+    if ! cp -a -- "$LEGACY_DATA_DIR" "$stage/config"; then
+        rm -rf --one-file-system -- "$stage"
+        if (( was_running )); then systemctl start "$SERVICE" || true; fi
+        fail '复制配置失败，保留旧目录。'; return 1
+    fi
+    if ! mv -- "$stage/config" "$INSTALL_ROOT/config"; then
+        rm -rf --one-file-system -- "$stage"
+        if (( was_running )); then systemctl start "$SERVICE" || true; fi
+        fail '放置新配置目录失败，保留旧目录。'; return 1
+    fi
+    rmdir -- "$stage" || true
+    MIGRATION_ACTIVE=1
+    MIGRATION_WAS_RUNNING="$was_running"
+    CONFIG_LAYOUT=integrated
+    set_config_dir || return 1
+    install_service_unit || return 1
+    save_state || return 1
+    # Validate the migrated config under the new CLOUDDRIVE_HOME even if the
+    # service was previously stopped, then restore its prior stopped state.
+    systemctl start "$SERVICE" || return 1
+    if ! wait_healthy; then
+        fail '迁移后服务未通过健康检查，正在恢复旧配置路径。'
+        return 1
+    fi
+    if (( was_running == 0 )); then systemctl stop "$SERVICE" || return 1; fi
+    MIGRATION_ACTIVE=0
+    # Once the new instance is healthy, the original copy may be removed.
+    # The migration backup remains in BACKUP_DIR.
+    safe_legacy_config_path || return 1
+    assert_no_mounts_under "$LEGACY_DATA_DIR" || return 1
+    rm -rf --one-file-system -- "$LEGACY_DATA_DIR" || {
+        warn "已迁移成功，但清理旧目录失败，请检查：$LEGACY_DATA_DIR"
+        return 0
+    }
+    log "配置目录迁移成功：$DATA_DIR"
+    log "可从备份恢复原配置：$backup"
 }
 
 show_status() {
     printf 'Installed version: %s\n' "$(current_version)"
-    printf 'Install root: %s\nData directory: %s\nBackup directory: %s\nMount target: %s\n' \
-        "$INSTALL_ROOT" "$DATA_DIR" "$BACKUP_DIR" "$MOUNT_DIR"
+    printf 'Install root: %s\nConfig directory: %s\nConfig layout: %s\nBackup directory: %s\nMount target: %s\n' \
+        "$INSTALL_ROOT" "$DATA_DIR" "$CONFIG_LAYOUT" "$BACKUP_DIR" "$MOUNT_DIR"
     printf 'FUSE device: '
     if [[ -e /dev/fuse ]]; then printf 'available\n'; else printf 'missing\n'; fi
     systemctl --no-pager -l status "$SERVICE" || true
@@ -801,8 +1020,11 @@ Commands:
   backups              List local backup archives
   restore [latest|NAME] Restore a verified manager backup (brief service stop)
   enable-allow-other   Permit non-root users to request FUSE allow_other
-  relocate /opt/PATH   Move binaries and update systemd service
-  uninstall [--yes]    Remove program/service, retain data/backups/mounts
+  relocate /opt/PATH   Move binaries and integrated config together
+  migrate-config       Migrate an existing v1.x config to /opt/PROGRAM/config
+  uninstall [--yes]    Remove program/service; retain config/backups/mounts
+  uninstall --purge    Delete ALL local CloudDrive2 program/config/backups/cache
+                       (requires typed confirmation; NEVER deletes cloud/mount)
   system-info          Print system and mount status
   about                Print manager information
   help                 Show this help
@@ -846,6 +1068,26 @@ menu_confirm() {
     printf '%s [y/N]: ' "$1"
     IFS= read -r answer || return 1
     [[ "$answer" == y || "$answer" == Y ]]
+}
+
+menu_uninstall() {
+    local option
+    while true; do
+        printf '\nCloudDrive2 卸载选项：\n'
+        printf '1、仅卸载程序（保留配置、缓存和备份，可重新安装）\n'
+        printf '2、卸载并删除全部本地数据（配置、缓存、备份均删除）\n'
+        printf '0、返回主菜单\n'
+        printf '%s\n' '-------------------'
+        printf '远端网盘文件与 %s 挂载目录始终不会删除。\n' "$MOUNT_DIR"
+        printf '请输入选项 [0-2]: '
+        IFS= read -r option || return 0
+        case "$option" in
+            1) menu_action uninstall; return 0 ;;
+            2) menu_action uninstall --purge; return 0 ;;
+            0) return 0 ;;
+            *) warn '无效选项，请输入 0-2。'; menu_pause ;;
+        esac
+    done
 }
 
 menu_restore() {
@@ -902,9 +1144,9 @@ menu_advanced_management() {
     local choice target
     while true; do
         printf '\n挂载与高级设置：\n'
-        printf '1、启用 FUSE allow_other\n2、迁移程序安装目录\n3、查看本地挂载状态\n'
+        printf '1、启用 FUSE allow_other\n2、迁移程序安装目录\n3、查看本地挂载状态\n4、迁移旧版配置到程序目录\n'
         printf '%s\n' '-------------------'
-        printf '0、返回主菜单\n\n请输入选项 [0-3]: '
+        printf '0、返回主菜单\n\n请输入选项 [0-4]: '
         IFS= read -r choice || return 0
         case "$choice" in
             1) menu_action enable-allow-other ;;
@@ -919,8 +1161,12 @@ menu_advanced_management() {
                 fi
                 ;;
             3) show_mount_info; menu_pause ;;
+            4) if menu_confirm '确定要备份并迁移旧版配置到程序目录吗？'; then
+                    menu_action migrate-config
+               else warn '已取消配置迁移。'; menu_pause
+               fi ;;
             0) return 0 ;;
-            *) warn '无效选项，请输入 0-3。'; menu_pause ;;
+            *) warn '无效选项，请输入 0-4。'; menu_pause ;;
         esac
     done
 }
@@ -938,7 +1184,7 @@ show_system_info() {
     printf '处理器架构：%s\n' "$(uname -m)"
     printf 'CloudDrive2：%s\n' "$(current_version)"
     printf '程序目录：%s/current\n' "$INSTALL_ROOT"
-    printf '数据目录：%s\n' "$DATA_DIR"
+    printf '配置目录：%s\n' "$DATA_DIR"
     printf '备份目录：%s\n' "$BACKUP_DIR"
     if [[ -f "$UNIT" ]]; then
         if service_running; then printf '服务状态：运行中\n'
@@ -1001,7 +1247,7 @@ menu() {
         printf '\n欢迎使用 CloudDrive2 管理脚本\n'
         printf '管理脚本：v%s | 核心：%s | 服务：%s\n' "$MANAGER_VERSION" "$installed_version" "$state"
         printf '程序目录：%s/current\n' "$INSTALL_ROOT"
-        printf '数据目录：%s\n' "$DATA_DIR"
+        printf '配置目录：%s\n' "$DATA_DIR"
         printf '更新检测：%s\n' "$update_notice"
         if (( EUID != 0 )); then
             printf '提示：当前非 root 用户，请使用 sudo 运行以执行管理操作。\n'
@@ -1038,7 +1284,7 @@ EOF
         case "$choice" in
             1) menu_action install ;;
             2) menu_action update ;;
-            3) menu_action uninstall ;;
+            3) menu_uninstall ;;
             4) menu_action status ;;
             5) menu_action logs-tail ;;
             6) menu_action start ;;
@@ -1093,6 +1339,7 @@ main() {
         restore) do_restore "${2:-latest}" ;;
         enable-allow-other) enable_allow_other ;;
         relocate) [[ -n "${2:-}" ]] || { fail 'A target path is required.'; return 1; }; do_relocate "$2" ;;
+        migrate-config) do_migrate_config ;;
         uninstall) do_uninstall "${2:-}" ;;
         *) usage; return 2 ;;
     esac
