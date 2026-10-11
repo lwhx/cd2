@@ -4,24 +4,69 @@
 
 > 这是独立编写的第三方管理脚本，不是 CloudDrive2 官方安装器。CloudDrive2 核心二进制仅从官方 GitHub 发布仓库下载。本脚本没有在真实目标服务器完成安装验证；已通过本地模拟测试。
 
-## GitHub 一键安装（推荐）
+## 中文交互菜单
 
-先将脚本下载到服务器，检查后再执行，不建议直接使用 `curl | bash`：
+**不加参数执行脚本会直接打开菜单**（并非直接安装）。界面采用单列数字选项和分组展示：
+
+```text
+欢迎使用 CloudDrive2 管理脚本
+基础功能：
+1、安装 CloudDrive2
+2、更新 CloudDrive2
+3、卸载 CloudDrive2
+-------------------
+服务管理：
+4、查看状态
+5、查看日志
+6、启动 CloudDrive2
+7、停止 CloudDrive2
+8、重启 CloudDrive2
+-------------------
+配置管理：
+9、备份配置
+10、恢复配置
+-------------------
+高级选项：
+11、版本管理
+12、挂载与高级设置
+13、系统状态
+14、关于
+-------------------
+0、退出脚本
+
+请输入选项 [0-14]:
+```
+
+「版本管理」包含检查版本、查看已安装版本、回滚和备份列表；「挂载与高级设置」包含启用 FUSE allow_other、迁移程序目录和查看挂载状态。退出子菜单返回主菜单。
+
+**首次部署**：选择 `1` 安装核心和 systemd 服务。管理员密码在 CloudDrive2 网页界面管理，原生版本不提供 Docker 子菜单，且不自动开启无人值守升级。
+
+## GitHub 下载并打开菜单（推荐）
+
+下载脚本、检查语法，使用 root 权限打开交互菜单：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lwhx/cd2/main/clouddrive2-manager.sh -o /tmp/clouddrive2-manager.sh
 bash -n /tmp/clouddrive2-manager.sh
-sudo bash /tmp/clouddrive2-manager.sh install
+sudo bash /tmp/clouddrive2-manager.sh
 ```
 
-安装完成后，通过 `sudo cd2-native` 进入中文菜单；使用 `sudo cd2-native update` 更新 CloudDrive2 核心。**脚本自身不会自动更新**，需要重新下载最新管理脚本替换。
+已有 v1.0.0 管理脚本的服务器，可以仅更新管理脚本而**不重新安装 CloudDrive2 核心**：
+
+```bash
+sudo install -m 0755 /tmp/clouddrive2-manager.sh /usr/local/sbin/cd2-native
+sudo cd2-native
+```
+
+**注意：** `2、更新 CloudDrive2` 更新官方核心程序，管理脚本自身不会自动更新；升级管理脚本请重新下载并按上面命令替换。
 
 ## 安装
 
 将 `clouddrive2-manager.sh` 上传到服务器，然后运行：
 
 ```bash
-sudo bash clouddrive2-manager.sh install
+sudo bash clouddrive2-manager.sh
+# 然后选择 1、安装 CloudDrive2
 ```
 
 安装完成后会自动把管理器复制到 `/usr/local/sbin/cd2-native`，以后直接运行：
@@ -30,7 +75,9 @@ sudo bash clouddrive2-manager.sh install
 sudo cd2-native
 ```
 
-系统会显示中文管理菜单。也可以使用命令行：
+系统会显示单列中文管理菜单。高级操作有子菜单；回到主菜单时重新显示安装与服务状态。
+
+如需非交互式安装，仍可运行 `sudo bash clouddrive2-manager.sh install`。其他命令行用法：
 
 ```bash
 sudo cd2-native check
