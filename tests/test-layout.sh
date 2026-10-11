@@ -82,6 +82,9 @@ tar -czf "$legacy_backup" -C "$work" clouddrive2
 mv "$work/clouddrive2" "$LEGACY_DATA_DIR"
 (cd "$BACKUP_DIR" && sha256sum old-config.tar.gz > old-config.tar.gz.sha256)
 assert verify_backup "$legacy_backup"
+# Purge intentionally deletes backup dir; retain a separate test fixture.
+cp "$legacy_backup" "$work/legacy-fixture.tar.gz"
+cp "$legacy_backup.sha256" "$work/legacy-fixture.sha256"
 
 # A normal "keep data" uninstall removes only binaries + service files.
 CONFIG_LAYOUT=integrated
@@ -126,6 +129,8 @@ assert test -f "$MOUNT_DIR/remote-files-must-stay"
 # Legacy layout migration: backup, copy, new systemd CLOUDDRIVE_HOME, keep
 # prior stopped state, remove old after successful healthy service check.
 mkdir -p "$root/releases/1.0.0" "$LEGACY_DATA_DIR" "$BACKUP_DIR"
+cp "$work/legacy-fixture.tar.gz" "$legacy_backup"
+cp "$work/legacy-fixture.sha256" "$legacy_backup.sha256"
 ln -s releases/1.0.0 "$root/current"
 printf 'legacy-account\n' > "$LEGACY_DATA_DIR/account.txt"
 CONFIG_LAYOUT=legacy
