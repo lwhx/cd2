@@ -469,11 +469,14 @@ EOF
 
 install_service_unit() {
     local t
-    t="$(mktemp /etc/systemd/system/.clouddrive2.service.XXXXXX)"
-    make_service_unit "$INSTALL_ROOT" "$t"
-    chmod 0644 "$t"
-    mv -f -- "$t" "$UNIT"
-    systemctl daemon-reload
+    t="$(mktemp "$(dirname "$UNIT")/.clouddrive2.service.XXXXXX")" || return 1
+    if ! make_service_unit "$INSTALL_ROOT" "$t" ||
+       ! chmod 0644 "$t" ||
+       ! mv -f -- "$t" "$UNIT"; then
+        rm -f -- "$t"
+        return 1
+    fi
+    systemctl daemon-reload || return 1
 }
 
 service_running() {
@@ -953,12 +956,12 @@ do_migrate_config() {
     MIGRATION_ACTIVE=1
     MIGRATION_WAS_RUNNING="$was_running"
     CONFIG_LAYOUT=integrated
-    set_config_dir
-    install_service_unit
-    save_state
+    set_config_dir || return 1
+    install_service_unit || return 1
+    save_state || return 1
     # Validate the migrated config under the new CLOUDDRIVE_HOME even if the
     # service was previously stopped, then restore its prior stopped state.
-    systemctl start "$SERVICE"
+    systemctl start "$SERVICE" || return 1
     if ! wait_healthy; then
         fail '迁移后服务未通过健康检查，正在恢复旧配置路径。'
         return 1
