@@ -701,6 +701,7 @@ Commands:
   status               Show systemd status and installation paths
   start|stop|restart   Manage systemd service
   logs                 Follow systemd logs
+  logs-tail            Show last 80 lines without following
   backup               Consistent full data directory backup (brief service stop)
   backups              List local backup archives
   restore [latest|NAME] Restore a verified manager backup (brief service stop)
@@ -922,7 +923,7 @@ EOF
             2) menu_action update ;;
             3) menu_action uninstall ;;
             4) menu_action status ;;
-            5) menu_action logs ;;
+            5) menu_action logs-tail ;;
             6) menu_action start ;;
             7) menu_action stop ;;
             8) menu_action restart ;;
@@ -969,6 +970,7 @@ main() {
         status) show_status ;;
         start|stop|restart) check_managed && systemctl "$cmd" "$SERVICE" ;;
         logs) check_managed && journalctl -u "$SERVICE" -f ;;
+        logs-tail) check_managed && journalctl -u "$SERVICE" -n 80 --no-pager ;;
         backup) do_backup ;;
         backups) show_backups ;;
         restore) do_restore "${2:-latest}" ;;
