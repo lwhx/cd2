@@ -36,7 +36,7 @@ load_state() { :; }
 current_version() { printf 'mock-version\n'; }
 service_running() { return 1; }
 flow="$(printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nsample.tar.gz\ny\n11\n1\n2\n3\ny\n4\n0\n12\n1\n2\n/opt/example\n3\n0\n13\n14\n0\n' | menu)"
-for command in install update uninstall status logs start stop restart backup backups \
+for command in install update uninstall status logs-tail start stop restart backup backups \
     'restore sample.tar.gz' check version rollback enable-allow-other 'relocate /opt/example'; do
     assert_contains "MOCK-EXEC:$command" "$flow"
 done
