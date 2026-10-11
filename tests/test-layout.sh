@@ -117,9 +117,16 @@ save_state
 printf 'wrong\n' | do_uninstall --purge
 assert test -f "$DATA_DIR/account.txt"
 assert test -f "$STATE"
+# Only exact lowercase 'yes' is accepted; abbreviated/uppercase answers cancel.
+printf 'y\n' | do_uninstall --purge
+assert test -f "$DATA_DIR/account.txt"
+assert test -f "$STATE"
+printf 'YES\n' | do_uninstall --purge
+assert test -f "$DATA_DIR/account.txt"
+assert test -f "$STATE"
 
 # Destructive purge deletes managed *local* paths, NEVER remote/mount content.
-printf 'DELETE-ALL-LOCAL-DATA\n' | do_uninstall --purge
+printf 'yes\n' | do_uninstall --purge
 assert test ! -e "$root"
 assert test ! -e "$BACKUP_DIR"
 assert test ! -e "$UPDATE_CACHE_DIR"

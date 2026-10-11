@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 APP_NAME='CloudDrive2 Native Manager'
-MANAGER_VERSION='1.3.0'
+MANAGER_VERSION='1.3.1'
 SERVICE='clouddrive2.service'
 SERVICE_USER='clouddrive2'
 SERVICE_GROUP='clouddrive2'
@@ -806,9 +806,9 @@ do_uninstall() {
         printf '删除范围：%s、%s、%s、%s\n' "$INSTALL_ROOT" "$DATA_DIR" "$BACKUP_DIR" "$UPDATE_CACHE_DIR"
         printf '不会删除远端网盘文件，也不会删除或遍历 %s。\n' "$MOUNT_DIR"
         printf '重要：删除备份后无法再通过管理脚本恢复原有配置。\n'
-        printf '确认删除全部本地数据，请输入 DELETE-ALL-LOCAL-DATA: '
+        printf '确认删除全部本地数据，请输入 yes: '
         IFS= read -r answer || return 1
-        [[ "$answer" == DELETE-ALL-LOCAL-DATA ]] || { warn '已取消彻底卸载。'; return 0; }
+        [[ "$answer" == yes ]] || { warn '已取消彻底卸载。'; return 0; }
     elif [[ "$mode" != '--yes' ]]; then
         printf '仅卸载程序，保留本地配置、备份和挂载目录。确认请输入 UNINSTALL: '
         IFS= read -r answer || return 1
