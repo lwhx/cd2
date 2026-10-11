@@ -45,4 +45,29 @@ assert_contains '关于 CloudDrive2 原生管理脚本' "$flow"
 assert_contains '请输入选项 [0-4]: ' "$flow"
 assert_contains '请输入选项 [0-3]: ' "$flow"
 
-printf 'Menu tests passed.\n'
+
+# Automatic release lookup, cached across menu sessions and refreshed after TTL.
+temp_auto="$(mktemp -d)"
+trap 'rm -rf -- "$temp_auto"' EXIT
+UPDATE_CACHE_DIR="$temp_auto/updates"
+UPDATE_CACHE_FILE="$UPDATE_CACHE_DIR/latest-release"
+UPDATE_CACHE_TTL=21600
+fetch_calls="$temp_auto/calls"
+arch_name() { printf 'x86_64\n'; }
+fetch_latest() {
+    printf 'called\n' >> "$fetch_calls"
+    printf '1.2.9\thttps://example.invalid/file\tsha256:placeholder\t123\n'
+}
+latest="$(get_latest_release_cached)"
+[[ "$latest" == 1.2.9 ]]
+assert_contains '发现新版本 1.2.3 → 1.2.9' "$(auto_update_notice 1.2.3 "$latest")"
+assert_contains '已是最新版本' "$(auto_update_notice 1.2.9 "$latest")"
+[[ "$(wc -l < "$fetch_calls")" == 1 ]]
+[[ "$(get_latest_release_cached)" == 1.2.9 ]]
+[[ "$(wc -l < "$fetch_calls")" == 1 ]]
+touch -d '7 hours ago' "$UPDATE_CACHE_FILE"
+[[ "$(get_latest_release_cached)" == 1.2.9 ]]
+[[ "$(wc -l < "$fetch_calls")" == 2 ]]
+assert_contains '本地不低于官方最新' "$(auto_update_notice 1.3.0 1.2.9)"
+
+printf 'Menu and update-check tests passed.\n'
