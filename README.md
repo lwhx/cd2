@@ -37,35 +37,39 @@
 请输入选项 [0-14]:
 ```
 
-「版本管理」包含检查版本、查看已安装版本、回滚和备份列表；「挂载与高级设置」包含启用 FUSE allow_other、迁移程序目录和查看挂载状态。退出子菜单返回主菜单。菜单中的「查看日志」显示最近 80 行并返回菜单；需要持续跟踪日志时请运行 `sudo cd2-native logs`。
+「版本管理」包含检查版本、查看已安装版本、回滚和备份列表；「挂载与高级设置」包含启用 FUSE allow_other、迁移程序目录和查看挂载状态。退出子菜单返回主菜单。菜单中的「查看日志」显示最近 80 行并返回菜单；需要持续跟踪日志时请运行 `sudo cd2-native logs`。菜单顶部会显示程序、数据目录和更新检测结果。
 
 **首次部署**：选择 `1` 安装核心和 systemd 服务。管理员密码在 CloudDrive2 网页界面管理，原生版本不提供 Docker 子菜单，且不自动开启无人值守升级。
 
 ## GitHub 下载并打开菜单（推荐）
 
-下载脚本、检查语法，使用 root 权限打开交互菜单：
+脚本统一下载到 **`/root/clouddrive2-manager.sh`**，CloudDrive2 核心和数据仍然分别存储在 `/opt` 和 `/var/lib`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lwhx/cd2/main/clouddrive2-manager.sh -o /tmp/clouddrive2-manager.sh
-bash -n /tmp/clouddrive2-manager.sh
-sudo bash /tmp/clouddrive2-manager.sh
+curl -fsSL https://raw.githubusercontent.com/lwhx/cd2/main/clouddrive2-manager.sh -o /root/clouddrive2-manager.sh
+bash -n /root/clouddrive2-manager.sh
+sudo bash /root/clouddrive2-manager.sh
 ```
 
-已有 v1.0.0 管理脚本的服务器，可以仅更新管理脚本而**不重新安装 CloudDrive2 核心**：
+打开菜单后选择 `1` 安装。安装成功后也会复制管理命令到 `/usr/local/sbin/cd2-native`。
+
+已经安装旧版脚本时，如果想在 `sudo cd2-native` 中使用新菜单，需要将新下载的脚本覆盖到管理命令位置。**这个操作只更换管理脚本，不会重装 CloudDrive2 核心或删除数据：**
 
 ```bash
-sudo install -m 0755 /tmp/clouddrive2-manager.sh /usr/local/sbin/cd2-native
+sudo install -m 0755 /root/clouddrive2-manager.sh /usr/local/sbin/cd2-native
 sudo cd2-native
 ```
 
-**注意：** `2、更新 CloudDrive2` 更新官方核心程序，管理脚本自身不会自动更新；升级管理脚本请重新下载并按上面命令替换。
+**自动检查更新：** 使用 root 打开菜单且 CloudDrive2 已安装时，会自动对比本地核心版本和官方 GitHub 最新发布版本。成功结果缓存 6 小时，网络请求最长约 6 秒。若有新版本，菜单顶部提示并引导选择 `2` 更新。也可以在版本管理中选择 `11 → 1` 手动重新查询。
+
+**自动检查不会自动升级。** 它不创建后台定时任务，不会擅自下载、替换或重启 CloudDrive2；更新必须由你主动选择。
 
 ## 安装
 
 将 `clouddrive2-manager.sh` 上传到服务器，然后运行：
 
 ```bash
-sudo bash clouddrive2-manager.sh
+sudo bash /root/clouddrive2-manager.sh
 # 然后选择 1、安装 CloudDrive2
 ```
 
@@ -95,6 +99,7 @@ sudo cd2-native logs
 
 | 用途 | 默认路径 |
 |---|---|
+| 下载的管理脚本 | `/root/clouddrive2-manager.sh` |
 | 当前安装版本 | `/opt/clouddrive2/current` |
 | 历史二进制版本 | `/opt/clouddrive2/releases` |
 | 配置与用户数据（`CLOUDDRIVE_HOME`） | `/var/lib/clouddrive2` |
@@ -102,6 +107,7 @@ sudo cd2-native logs
 | 建议的 FUSE 挂载位置 | `/mnt/clouddrive2` |
 | systemd 服务 | `/etc/systemd/system/clouddrive2.service` |
 | 管理命令 | `/usr/local/sbin/cd2-native` |
+| 官方版本检测缓存 | `/var/cache/clouddrive2-native-manager/latest-release` |
 
 挂载目录 **不会自动挂载**。安装成功后，需在 CloudDrive2 网页端的「挂载点」设置中选择 `/mnt/clouddrive2` 并启用开机自动挂载。
 
@@ -137,7 +143,8 @@ sudo cd2-native uninstall
 
 - 如果服务器已有 CloudDrive2 Docker 容器或第三方 `clouddrive.service`，请先自行迁移、备份并停止旧服务。本脚本不会自动迁移原 Docker `/Config` 数据，也不会删除旧服务。
 - 自动识别的是官方“核心服务”版本，不是独立的桌面 / 手机客户端版本。
-- 本脚本本身不会自动在线升级；“一键更新”指 CloudDrive2 核心服务的更新，也不会创建无人值守的定时更新任务。
+- 打开菜单时会检查 CloudDrive2 核心更新并缓存成功查询结果 6 小时；不会后台定时检查或无人值守安装更新。
+- 本脚本自身不会自动在线升级；“一键更新”仅指 CloudDrive2 核心程序的更新。
 - 如果一个新版本虽启动成功但出现应用级别的兼容问题，可手动回滚；脚本不能保证覆盖全部潜在故障。
 - 自动回滚与备份**不能代替异机备份**；重要配置应定期另存到其他磁盘或服务器。
 

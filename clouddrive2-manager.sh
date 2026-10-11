@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 APP_NAME='CloudDrive2 Native Manager'
-MANAGER_VERSION='1.1.0'
+MANAGER_VERSION='1.2.0'
 SERVICE='clouddrive2.service'
 SERVICE_USER='clouddrive2'
 SERVICE_GROUP='clouddrive2'
@@ -17,6 +17,9 @@ DATA_DIR='/var/lib/clouddrive2'
 BACKUP_DIR='/var/backups/clouddrive2'
 MOUNT_DIR='/mnt/clouddrive2'
 RELEASE_API='https://api.github.com/repos/cloud-fs/cloud-fs.github.io/releases/latest'
+UPDATE_CACHE_DIR='/var/cache/clouddrive2-native-manager'
+UPDATE_CACHE_FILE="$UPDATE_CACHE_DIR/latest-release"
+UPDATE_CACHE_TTL=21600 # Six hours
 LOCK_FILE='/run/lock/clouddrive2-native-manager.lock'
 PORT='19798'
 TMP_WORK=''
@@ -159,9 +162,16 @@ check_conflicts() {
 
 fetch_latest() {
     # Emits 4 TAB-separated fields: version, download_url, sha256_digest, size
-    local arch="$1" payload row filename url digest size version prefix
+    local arch="$1" mode="${2:-normal}" payload row filename url digest size version prefix
+    local retry=3 connection_timeout=15 max_time=45
     prefix="clouddrive-2-linux-${arch}-"
-    payload="$(curl -fsSL --retry 3 --connect-timeout 15 --max-time 45 \
+    # Limit the latency of checks performed when opening the menu.
+    if [[ "$mode" == quick ]]; then
+        retry=0
+        connection_timeout=3
+        max_time=6
+    fi
+    payload="$(curl -fsSL --retry "$retry" --connect-timeout "$connection_timeout" --max-time "$max_time" \
         -H 'Accept: application/vnd.github+json' "$RELEASE_API")" || return 1
     row="$(printf '%s' "$payload" | jq -er --arg prefix "$prefix" '
         [.assets[] | select(.name | startswith($prefix) and endswith(".tgz"))] |
@@ -181,6 +191,71 @@ fetch_latest() {
     fi
     [[ "$size" =~ ^[0-9]+$ ]] || { fail 'Unexpected package size.'; return 1; }
     printf '%s\t%s\t%s\t%s\n' "$version" "$url" "$digest" "$size"
+}
+
+valid_release_version() {
+    [[ "$1" =~ ^[0-9][0-9A-Za-z._-]{0,59}$ ]]
+}
+
+version_is_newer() {
+    local installed="$1" latest="$2"
+    [[ "$installed" != "$latest" ]] || return 1
+    valid_release_version "$installed" && valid_release_version "$latest" || return 1
+    [[ "$(printf '%s\n' "$installed" "$latest" | LC_ALL=C sort -V | tail -n 1)" == "$latest" ]]
+}
+
+managed_install_present() {
+    [[ -f "$STATE" && -f "$UNIT" && -L "$INSTALL_ROOT/current" ]]
+}
+
+write_latest_cache() {
+    local version="$1" tmp
+    valid_release_version "$version" || return 1
+    [[ ! -L "$UPDATE_CACHE_DIR" && ! -L "$UPDATE_CACHE_FILE" ]] || return 1
+    install -d -m 0700 "$UPDATE_CACHE_DIR" || return 1
+    tmp="$(mktemp "$UPDATE_CACHE_DIR/.latest.XXXXXXXX")" || return 1
+    if ! printf '%s\n' "$version" > "$tmp"; then rm -f -- "$tmp"; return 1; fi
+    chmod 0600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+    mv -f -- "$tmp" "$UPDATE_CACHE_FILE" || { rm -f -- "$tmp"; return 1; }
+}
+
+read_fresh_latest_cache() {
+    local modified now latest
+    [[ -f "$UPDATE_CACHE_FILE" && ! -L "$UPDATE_CACHE_FILE" ]] || return 1
+    modified="$(stat -c %Y "$UPDATE_CACHE_FILE" 2>/dev/null)" || return 1
+    now="$(date +%s)"
+    [[ "$modified" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] || return 1
+    (( now >= modified && now - modified < UPDATE_CACHE_TTL )) || return 1
+    IFS= read -r latest < "$UPDATE_CACHE_FILE" || return 1
+    valid_release_version "$latest" || return 1
+    printf '%s\n' "$latest"
+}
+
+get_latest_release_cached() {
+    local arch meta version remainder
+    if read_fresh_latest_cache; then return 0; fi
+    command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+    arch="$(arch_name)" || return 1
+    meta="$(fetch_latest "$arch" quick)" || return 1
+    IFS=$'\t' read -r version remainder <<< "$meta"
+    valid_release_version "$version" || return 1
+    write_latest_cache "$version" || true
+    printf '%s\n' "$version"
+}
+
+auto_update_notice() {
+    local installed="$1" latest="$2"
+    if [[ "$installed" == not-installed ]]; then
+        printf '未安装（安装时将获取官方最新版本）\n'
+    elif [[ -z "$latest" ]]; then
+        printf '检测失败或网络不可用，可选 11 → 1 手动检查\n'
+    elif [[ "$installed" == "$latest" ]]; then
+        printf '已是最新版本 %s\n' "$installed"
+    elif version_is_newer "$installed" "$latest"; then
+        printf '发现新版本 %s → %s！选择 2 更新\n' "$installed" "$latest"
+    else
+        printf '本地 %s / 官方最新 %s（本地不低于官方最新）\n' "$installed" "$latest"
+    fi
 }
 
 current_version() {
