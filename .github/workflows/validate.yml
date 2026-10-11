@@ -1,0 +1,18 @@
+name: Validate native manager
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: bash -n clouddrive2-manager.sh
+      - name: Check help and path validation
+        run: |
+          bash clouddrive2-manager.sh help
+          bash -e -c 'source ./clouddrive2-manager.sh; valid_install_path /opt/clouddrive2; valid_install_path /opt/apps/cd2; ! valid_install_path /var/lib/clouddrive2; ! valid_install_path /opt/../unsafe'
