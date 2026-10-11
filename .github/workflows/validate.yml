@@ -18,3 +18,5 @@ jobs:
           bash -e -c 'source ./clouddrive2-manager.sh; valid_install_path /opt/clouddrive2; valid_install_path /opt/apps/cd2; ! valid_install_path /var/lib/clouddrive2; ! valid_install_path /opt/../unsafe'
       - name: Verify Chinese interactive menus
         run: bash tests/test-menu.sh
+      - name: Verify layout, migration and uninstall safety
+        run: bash tests/test-layout.sh

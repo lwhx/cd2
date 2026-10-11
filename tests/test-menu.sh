@@ -22,7 +22,7 @@ assert_contains '1、安装 CloudDrive2' "$start"
 assert_contains '3、卸载 CloudDrive2' "$start"
 assert_contains '请输入选项 [0-14]: ' "$start"
 assert_contains '程序目录：/opt/clouddrive2/current' "$start"
-assert_contains '数据目录：/var/lib/clouddrive2' "$start"
+assert_contains '配置目录：/opt/clouddrive2/config' "$start"
 assert_contains '更新检测：' "$start"
 assert_contains '已退出 CloudDrive2 管理脚本。' "$start"
 
@@ -38,15 +38,16 @@ menu_pause() { :; }
 load_state() { :; }
 current_version() { printf 'mock-version\n'; }
 service_running() { return 1; }
-flow="$(printf '1\n2\n3\n4\n5\n6\n7\n8\n9\n10\nsample.tar.gz\ny\n11\n1\n2\n3\ny\n4\n0\n12\n1\n2\n/opt/example\n3\n0\n13\n14\n0\n' | menu)"
-for command in install update uninstall status logs-tail start stop restart backup backups \
-    'restore sample.tar.gz' check version rollback enable-allow-other 'relocate /opt/example'; do
+flow="$(printf '1\n2\n3\n1\n3\n2\n4\n5\n6\n7\n8\n9\n10\nsample.tar.gz\ny\n11\n1\n2\n3\ny\n4\n0\n12\n1\n2\n/opt/example\n3\n4\ny\n0\n13\n14\n0\n' | menu)"
+for command in install update uninstall 'uninstall --purge' status logs-tail start stop restart backup backups \
+    'restore sample.tar.gz' check version rollback enable-allow-other 'relocate /opt/example' migrate-config; do
     assert_contains "MOCK-EXEC:$command" "$flow"
 done
 assert_contains '系统状态：' "$flow"
 assert_contains '关于 CloudDrive2 原生管理脚本' "$flow"
 assert_contains '请输入选项 [0-4]: ' "$flow"
-assert_contains '请输入选项 [0-3]: ' "$flow"
+assert_contains '请输入选项 [0-4]: ' "$flow"
+assert_contains '请输入选项 [0-2]: ' "$flow"
 
 
 # Automatic release lookup, cached across menu sessions and refreshed after TTL.

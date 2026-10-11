@@ -174,6 +174,13 @@ safe_legacy_config_path() {
     [[ ! -L "$LEGACY_DATA_DIR" ]] || { fail 'Legacy configuration is a symlink.'; return 1; }
 }
 
+safe_auxiliary_purge_paths() {
+    [[ "$BACKUP_DIR" == /var/backups/clouddrive2 &&
+       "$UPDATE_CACHE_DIR" == /var/cache/clouddrive2-native-manager ]] || {
+        fail 'Unexpected backup/cache path. Refusing purge.'; return 1;
+    }
+}
+
 arch_name() {
     case "$(uname -m)" in
         x86_64|amd64) printf 'x86_64\n' ;;
@@ -219,10 +226,15 @@ check_conflicts() {
         local entry
         for entry in "$INSTALL_ROOT"/* "$INSTALL_ROOT"/.[!.]* "$INSTALL_ROOT"/..?*; do
             [[ -e "$entry" || -L "$entry" ]] || continue
-            if [[ "$entry" != "$INSTALL_ROOT/config" || ! -d "$entry" || -L "$entry" ]]; then
-                fail "Install root contains unmanaged files: $entry"
-                return 1
+            if [[ "$entry" == "$INSTALL_ROOT/config" && -d "$entry" && ! -L "$entry" ]]; then
+                continue
             fi
+            # Preserve restore snapshots during keep-data uninstall/reinstall.
+            if [[ "$entry" == "$INSTALL_ROOT/config.before-restore-"* && -d "$entry" && ! -L "$entry" ]]; then
+                continue
+            fi
+            fail "Install root contains unmanaged files: $entry"
+            return 1
         done
         # A prior keep-data uninstall may leave only the config directory.
         # Reinstalling is allowed so long as no other files are present.
@@ -632,7 +644,7 @@ do_install() {
     write_latest_cache "$version" || true
     log "Installation complete. Version: $version"
     log "Core directory: $INSTALL_ROOT/current"
-    log "Persistent user data: $DATA_DIR"
+    log "Local configuration: $DATA_DIR"
     log "Configuration backups: $BACKUP_DIR"
     log "Management command: $MANAGER_BIN"
     log "Web UI: http://YOUR_SERVER_IP:$PORT"
@@ -810,10 +822,7 @@ do_uninstall() {
             safe_legacy_config_path || return 1
             assert_no_mounts_under "$LEGACY_DATA_DIR" || return 1
         fi
-        [[ "$BACKUP_DIR" == /var/backups/clouddrive2 &&
-           "$UPDATE_CACHE_DIR" == /var/cache/clouddrive2-native-manager ]] || {
-            fail 'Unexpected backup/cache path. Refusing purge.'; return 1;
-        }
+        safe_auxiliary_purge_paths || return 1
     fi
 
     if ! systemctl stop "$SERVICE" || service_running; then
@@ -1065,7 +1074,7 @@ menu_uninstall() {
         printf '1、仅卸载程序（保留配置、缓存和备份，可重新安装）\n'
         printf '2、卸载并删除全部本地数据（配置、缓存、备份均删除）\n'
         printf '0、返回主菜单\n'
-        printf '-------------------\n'
+        printf '%s\n' '-------------------'
         printf '远端网盘文件与 %s 挂载目录始终不会删除。\n' "$MOUNT_DIR"
         printf '请输入选项 [0-2]: '
         IFS= read -r option || return 0
