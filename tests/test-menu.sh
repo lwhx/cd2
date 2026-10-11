@@ -21,6 +21,9 @@ assert_contains '高级选项：' "$start"
 assert_contains '1、安装 CloudDrive2' "$start"
 assert_contains '3、卸载 CloudDrive2' "$start"
 assert_contains '请输入选项 [0-14]: ' "$start"
+assert_contains '程序目录：/opt/clouddrive2/current' "$start"
+assert_contains '数据目录：/var/lib/clouddrive2' "$start"
+assert_contains '更新检测：' "$start"
 assert_contains '已退出 CloudDrive2 管理脚本。' "$start"
 
 # Invalid inputs and EOF must not hang.
@@ -70,4 +73,11 @@ touch -d '7 hours ago' "$UPDATE_CACHE_FILE"
 [[ "$(wc -l < "$fetch_calls")" == 2 ]]
 assert_contains '本地不低于官方最新' "$(auto_update_notice 1.3.0 1.2.9)"
 
+# Ensure that the real interactive menu calls the auto-check helper and shows
+# a visible update alert without automatically installing a release.
+managed_install_present() { return 0; }
+current_version() { printf '1.2.3\n'; }
+get_latest_release_cached() { printf '1.2.9\n'; }
+notice_menu="$(printf '0\n' | menu)"
+assert_contains '更新检测：发现新版本 1.2.3 → 1.2.9！选择 2 更新' "$notice_menu"
 printf 'Menu and update-check tests passed.\n'

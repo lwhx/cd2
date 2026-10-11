@@ -5,7 +5,7 @@ set -Eeuo pipefail
 umask 027
 
 APP_NAME='CloudDrive2 Native Manager'
-MANAGER_VERSION='1.2.0'
+MANAGER_VERSION='1.2.1'
 SERVICE='clouddrive2.service'
 SERVICE_USER='clouddrive2'
 SERVICE_GROUP='clouddrive2'
@@ -545,7 +545,11 @@ do_install() {
         install -m 0755 "${BASH_SOURCE[0]}" "$MANAGER_BIN"
     fi
     optional_http_probe
+    write_latest_cache "$version" || true
     log "Installation complete. Version: $version"
+    log "Core directory: $INSTALL_ROOT/current"
+    log "Persistent user data: $DATA_DIR"
+    log "Configuration backups: $BACKUP_DIR"
     log "Management command: $MANAGER_BIN"
     log "Web UI: http://YOUR_SERVER_IP:$PORT"
     log "Suggested FUSE mount directory: $MOUNT_DIR (configure in the Web UI)"
@@ -558,8 +562,15 @@ do_check() {
     arch="$(arch_name)"
     meta="$(fetch_latest "$arch")" || { fail 'Cannot query the official release.'; return 1; }
     IFS=$'\t' read -r version url digest size <<< "$meta"
+    write_latest_cache "$version" || true
     printf 'Installed: %s\nOfficial latest: %s\n' "$installed" "$version"
-    if [[ "$installed" == "$version" ]]; then log 'Already up to date.'; else log 'An update is available.'; fi
+    if [[ "$installed" == "$version" ]]; then
+        log 'Already up to date.'
+    elif version_is_newer "$installed" "$version"; then
+        log 'An update is available.'
+    else
+        warn 'Installed core is not older than the latest official release.'
+    fi
 }
 
 do_update() {
@@ -570,7 +581,15 @@ do_update() {
     meta="$(fetch_latest "$arch")" || { fail 'Could not query the official release.'; return 1; }
     IFS=$'\t' read -r version url digest size <<< "$meta"
     old_version="$(current_version)"
-    if [[ "$old_version" == "$version" ]]; then log "Already at latest version $version."; return 0; fi
+    if [[ "$old_version" == "$version" ]]; then
+        write_latest_cache "$version" || true
+        log "Already at latest version $version."
+        return 0
+    fi
+    if ! version_is_newer "$old_version" "$version"; then
+        fail "Installed core $old_version is not older than official latest $version; refusing automatic downgrade."
+        return 1
+    fi
     log "Updating $old_version -> $version"
     prepare_release "$version" "$url" "$digest" "$size"
     old="$(readlink "$INSTALL_ROOT/current")"
@@ -603,6 +622,7 @@ do_update() {
         warn 'The service was stopped before updating; not starting it automatically.'
     fi
     TX_ACTIVE=0
+    write_latest_cache "$version" || true
     log "Successfully updated to $version."
     log "Previous version retained at: $INSTALL_ROOT/$old"
 }
@@ -917,6 +937,9 @@ show_system_info() {
     printf '内核版本：%s\n' "$(uname -r)"
     printf '处理器架构：%s\n' "$(uname -m)"
     printf 'CloudDrive2：%s\n' "$(current_version)"
+    printf '程序目录：%s/current\n' "$INSTALL_ROOT"
+    printf '数据目录：%s\n' "$DATA_DIR"
+    printf '备份目录：%s\n' "$BACKUP_DIR"
     if [[ -f "$UNIT" ]]; then
         if service_running; then printf '服务状态：运行中\n'
         else printf '服务状态：未运行\n'; fi
@@ -949,7 +972,8 @@ show_about() {
 }
 
 menu() {
-    local choice state
+    local choice state installed_version last_checked_version='__unchecked__'
+    local latest_seen='' update_notice='尚未安装'
     while true; do
         # Reload after install/relocate/uninstall: each command runs in a child.
         INSTALL_ROOT='/opt/clouddrive2'
@@ -959,8 +983,26 @@ menu() {
         if [[ -f "$UNIT" ]]; then
             if service_running; then state='运行中'; else state='未运行'; fi
         fi
+        installed_version="$(current_version)"
+        # Run an automatic check once per installed version per menu session.
+        # A successful query is cached for six hours across separate invocations.
+        if [[ "$installed_version" != "$last_checked_version" ]]; then
+            latest_seen=''
+            if managed_install_present; then
+                latest_seen="$(get_latest_release_cached 2>/dev/null)" || latest_seen=''
+                update_notice="$(auto_update_notice "$installed_version" "$latest_seen")"
+            elif [[ "$installed_version" == not-installed ]]; then
+                update_notice='尚未安装（安装时会获取官方最新版本）'
+            else
+                update_notice='未检测到完整的脚本管理安装，请使用 4 查看状态'
+            fi
+            last_checked_version="$installed_version"
+        fi
         printf '\n欢迎使用 CloudDrive2 管理脚本\n'
-        printf '管理脚本：v%s | 核心：%s | 服务：%s\n' "$MANAGER_VERSION" "$(current_version)" "$state"
+        printf '管理脚本：v%s | 核心：%s | 服务：%s\n' "$MANAGER_VERSION" "$installed_version" "$state"
+        printf '程序目录：%s/current\n' "$INSTALL_ROOT"
+        printf '数据目录：%s\n' "$DATA_DIR"
+        printf '更新检测：%s\n' "$update_notice"
         if (( EUID != 0 )); then
             printf '提示：当前非 root 用户，请使用 sudo 运行以执行管理操作。\n'
         fi
@@ -1004,7 +1046,7 @@ EOF
             8) menu_action restart ;;
             9) menu_action backup ;;
            10) menu_restore ;;
-           11) menu_version_management ;;
+           11) menu_version_management; last_checked_version='__unchecked__' ;;
            12) menu_advanced_management ;;
            13) show_system_info; menu_pause ;;
            14) show_about; menu_pause ;;
